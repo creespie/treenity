@@ -12,6 +12,62 @@ import (
 
 var reg = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,32}$`)
 
+func replyFifoPath(serverPath string) string {
+	return fmt.Sprintf("%s.@%d", serverPath, os.Getpid())
+}
+
+func connectServer(serverPath string) (*os.File, error) {
+	info, err := os.Stat(serverPath)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeNamedPipe == 0 {
+		return nil, fmt.Errorf("%s is not a FIFO", serverPath)
+	}
+
+	server, err := os.OpenFile(serverPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, syscall.ENXIO) {
+		return nil, fmt.Errorf("no server is listening on %s", serverPath)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return server, nil
+}
+
+func request(server *os.File, serverPath string, msg string) (string, error) {
+	defer server.Close()
+
+	replyPath := replyFifoPath(serverPath)
+	if err := syscall.Mkfifo(replyPath, 0600); err != nil {
+		return "", err
+	}
+	defer os.Remove(replyPath)
+
+	if _, err := fmt.Fprintf(server, "%s %s\n", replyPath, msg); err != nil {
+		return "", err
+	}
+
+	reply, err := os.OpenFile(replyPath, os.O_RDONLY, 0)
+	if err != nil {
+		return "", err
+	}
+	defer reply.Close()
+
+	scan := bufio.NewScanner(reply)
+	if !scan.Scan() {
+		if err := scan.Err(); err != nil {
+			return "", err
+		}
+		return "", errors.New("server closed the connection without replying")
+	}
+	return scan.Text(), nil
+}
+
+func doList(serverPath string, args []string) int{
+	
+}
+
 func main(){
 	if len(os.Args) < 3{
 		fmt.Fprintln(os.Stderr, "errore: not enough arguments", )
