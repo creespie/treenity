@@ -64,43 +64,59 @@ func request(server *os.File, serverPath string, msg string) (string, error) {
 	}
 	return scan.Text(), nil
 }
-
-func doList(serverPath string, args []string) int {
-	if len(args) != 0 {
-		fmt.Fprint(os.Stderr,
-			"Wrong list format\nExpected: <ipc> list\n")
-		return 1
-	}
+func runRequest(serverPath string, msg string) int {
 	serverFile, err := connectServer(serverPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-	answer, err := request(serverFile, serverPath, "list")
+	answer, err := request(serverFile, serverPath, msg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 3
 	}
+
 	parts := strings.SplitN(answer, " ", 2)
+	data := ""
+	if len(parts) == 2 {
+		data = parts[1]
+	}
+
 	switch parts[0] {
-	case "ERR":
-		if len(parts) != 1 {
-			fmt.Fprintln(os.Stderr, "error:", parts[1])
-		} else {
-			fmt.Fprintln(os.Stderr, "Error in the retrieving of the data")
-		}
-		return 2
 	case "OK":
-		if len(parts) != 1 {
-			fmt.Println(parts[1])
-		} else {
-			fmt.Println("")
-		}
+		fmt.Println(data)
+		return 0
+	case "ERR":
+		fmt.Fprintln(os.Stderr, "error:", data)
+		return 2
 	default:
-		fmt.Fprintln(os.Stderr, "Unexpected format in retrieved data")
+		fmt.Fprintln(os.Stderr, "error: unexpected reply from server:", answer)
 		return 3
 	}
-	return 0
+}
+
+func doList(serverPath string, args []string) int {
+	if len(args) != 0 {
+		fmt.Fprintln(os.Stderr, "usage: <ipc> list")
+		return 1
+	}
+	return runRequest(serverPath, "list")
+}
+
+func doCreate(serverPath string, args []string) int {
+	if len(args) != 1 || !reg.MatchString(args[0]) {
+		fmt.Fprintln(os.Stderr, "usage: <ipc> create <topic>  (topic: ^[a-zA-Z0-9_.-]{1,32}$)")
+		return 1
+	}
+	return runRequest(serverPath, "create "+args[0])
+}
+
+func doInfo(serverPath string, args []string) int {
+	if len(args) != 1 || !reg.MatchString(args[0]) {
+		fmt.Fprintln(os.Stderr, "usage: <ipc> info <name>  (name: ^[a-zA-Z0-9_.-]{1,32}$)")
+		return 1
+	}
+	return runRequest(serverPath, "info "+args[0])
 }
 
 func main() {
@@ -139,21 +155,9 @@ func main() {
 
 	switch command {
 	case "create":
-		if len(os.Args) != 4 || !reg.MatchString(os.Args[3]) {
-			fmt.Fprintln(os.Stderr,
-				"Wrong create format\nExpected: <ipc> create <topic>\nTopic must respect the regex ^[a-zA-Z0-9_.-]{1,32}$ \n", err)
-			os.Remove(path)
-			os.Exit(1)
-		}
-		doCreate()
+		os.Exit(doCreate(serverPath, os.Args[3:]))
 	case "list":
-		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr,
-				"Wrong list format\nExpected: <ipc> list\n", err)
-			os.Remove(path)
-			os.Exit(1)
-		}
-		doList()
+		os.Exit(doList(serverPath, os.Args[3:]))
 	case "produce":
 		if len(os.Args) < 4 || len(os.Args) > 5 {
 			fmt.Fprintln(os.Stderr, "Wrong produce format\nExpected: <ipc> produce <topic>\nWith optional flag --raw", err)
@@ -174,12 +178,7 @@ func main() {
 	case "subscribe":
 		doSubscribe()
 	case "info":
-		if len(os.Args) != 4 {
-			fmt.Fprintln(os.Stderr, "Wrong info format\nExpected: <ipc> info <name>\n", err)
-			os.Remove(path)
-			os.Exit(1)
-		}
-		doInfo()
+		os.Exit(doInfo(serverPath, os.Args[3:]))
 	default:
 		fmt.Fprintln(os.Stderr, "Unrecognised command")
 		os.Remove(path)
