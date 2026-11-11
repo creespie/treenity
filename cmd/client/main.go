@@ -1,13 +1,14 @@
 package main
 
 import (
-	"os"
-	"fmt"
 	"bufio"
-	"syscall"
-	"os/signal"
 	"errors"
+	"fmt"
+	"os"
+	"os/signal"
 	"regexp"
+	"strings"
+	"syscall"
 )
 
 var reg = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,32}$`)
@@ -64,18 +65,52 @@ func request(server *os.File, serverPath string, msg string) (string, error) {
 	return scan.Text(), nil
 }
 
-func doList(serverPath string, args []string) int{
-	
+func doList(serverPath string, args []string) int {
+	if len(args) != 0 {
+		fmt.Fprint(os.Stderr,
+			"Wrong list format\nExpected: <ipc> list\n")
+		return 1
+	}
+	serverFile, err := connectServer(serverPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	answer, err := request(serverFile, serverPath, "list")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 3
+	}
+	parts := strings.SplitN(answer, " ", 2)
+	switch parts[0] {
+	case "ERR":
+		if len(parts) != 1 {
+			fmt.Fprintln(os.Stderr, "error:", parts[1])
+		} else {
+			fmt.Fprintln(os.Stderr, "Error in the retrieving of the data")
+		}
+		return 2
+	case "OK":
+		if len(parts) != 1 {
+			fmt.Println(parts[1])
+		} else {
+			fmt.Println("")
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "Unexpected format in retrieved data")
+		return 3
+	}
+	return 0
 }
 
-func main(){
-	if len(os.Args) < 3{
-		fmt.Fprintln(os.Stderr, "errore: not enough arguments", )
+func main() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "errore: not enough arguments")
 		os.Exit(1)
 	}
 	serverPath := os.Args[1]
 	info, err := os.Stat(serverPath)
-	if err != nil || info.Mode()&os.ModeNamedPipe == 0{
+	if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
 		fmt.Fprintln(os.Stderr, "Not a valid server path:", err)
 		os.Exit(1)
 	}
@@ -101,20 +136,20 @@ func main(){
 		os.Remove(path)
 		os.Exit(0)
 	}()
-	
-	switch command{
+
+	switch command {
 	case "create":
-		if len(os.Args) != 4 || !reg.MatchString(os.Args[3]){
+		if len(os.Args) != 4 || !reg.MatchString(os.Args[3]) {
 			fmt.Fprintln(os.Stderr,
-			"Wrong create format\nExpected: <ipc> create <topic>\nTopic must respect the regex ^[a-zA-Z0-9_.-]{1,32}$ \n", err)
+				"Wrong create format\nExpected: <ipc> create <topic>\nTopic must respect the regex ^[a-zA-Z0-9_.-]{1,32}$ \n", err)
 			os.Remove(path)
 			os.Exit(1)
 		}
 		doCreate()
 	case "list":
-		if len(os.Args) != 3{
+		if len(os.Args) != 3 {
 			fmt.Fprintln(os.Stderr,
-			"Wrong list format\nExpected: <ipc> list\n", err)
+				"Wrong list format\nExpected: <ipc> list\n", err)
 			os.Remove(path)
 			os.Exit(1)
 		}
@@ -125,12 +160,12 @@ func main(){
 			os.Remove(path)
 			os.Exit(1)
 		}
-		if len(os.Args) == 4{
+		if len(os.Args) == 4 {
 			doProduce()
-		}else{
-			if os.Args[4] != "--raw"{
+		} else {
+			if os.Args[4] != "--raw" {
 				fmt.Fprintln(os.Stderr,
-				"Wrong produce format\nExpected: <ipc> produce <topic>\nWith optional flag --raw", err)
+					"Wrong produce format\nExpected: <ipc> produce <topic>\nWith optional flag --raw", err)
 				os.Remove(path)
 				os.Exit(1)
 			}
@@ -139,7 +174,7 @@ func main(){
 	case "subscribe":
 		doSubscribe()
 	case "info":
-		if len(os.Args) != 4{
+		if len(os.Args) != 4 {
 			fmt.Fprintln(os.Stderr, "Wrong info format\nExpected: <ipc> info <name>\n", err)
 			os.Remove(path)
 			os.Exit(1)
@@ -160,5 +195,5 @@ func main(){
 	for scan.Scan() {
 		line := scan.Text()
 		fmt.Printf("%s\n", line)
-	} 
+	}
 }
