@@ -18,12 +18,20 @@ type Response struct {
 	Error string `json:"error,omitempty"` 
 }
 
+type Delivery struct {
+	Offset   uint32 `json:"offset"`
+	Key      []byte `json:"key,omitempty"`
+	Value    []byte `json:"value,omitempty"`
+	Shutdown bool   `json:"shutdown,omitempty"`
+}
 
 const (
+	CmdRequest = "request"
 	CmdMsg = "msg"
 	CmdList   = "list"
 	CmdCreate = "create"
 	CmdInfo   = "info"
 	CmdProduce = "produce"
 	CmdSubscribe = "subscribe"
+	CmdCommit = "commit"
 )
