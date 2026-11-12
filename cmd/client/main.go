@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"syscall"
+	"os/signal"
 	"regexp"
+	"strings"
+	"syscall"
 
 	"treenity/internal"
 )
@@ -79,19 +83,19 @@ func runRequest(serverPath string, req internal.Request) int {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-	req.Reply =  replyFifoPath(serverPath)
+	req.Reply = replyFifoPath(serverPath)
 	answer, err := request(serverFile, req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 3
 	}
 
-	if answer.OK{
+	if answer.OK {
 		fmt.Println(answer.Data)
 		return 0
 	}
 	fmt.Fprintln(os.Stderr, "error:", answer.Error)
-	if answer.Code != 0{
+	if answer.Code != 0 {
 		return answer.Code
 	}
 	return 3
@@ -124,80 +128,164 @@ func doInfo(serverPath string, args []string) int {
 	return runRequest(serverPath, req)
 }
 
+func readTextMessage(scan *bufio.Scanner) ([]byte, []byte, error) {
+	if !scan.Scan() {
+		if err := scan.Err(); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, io.EOF
+	}
+	line := scan.Text()
+	key, value, found := strings.Cut(line, ":")
+	if !found {
+		return nil, nil, fmt.Errorf("expected key:value, got %q", line)
+	}
+	return []byte(key), []byte(value), nil
+}
+
+// Legge un messaggio in formato --raw:
+// [keysize:uint32 LE][key][valuesize:uint32 LE][value]
+// Restituisce io.EOF solo se lo stdin finisce PRIMA di un nuovo record.
+func readRawMessage(r io.Reader) ([]byte, []byte, error) {
+	size := make([]byte, 4)
+
+	if _, err := io.ReadFull(r, size); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil, io.EOF
+		}
+		return nil, nil, errors.New("truncated record (key size)")
+	}
+	keySize := binary.LittleEndian.Uint32(size)
+	if keySize > maxMessageSize {
+		return nil, nil, fmt.Errorf("key too long (%d bytes)", keySize)
+	}
+
+	key := make([]byte, keySize)
+	if _, err := io.ReadFull(r, key); err != nil {
+		return nil, nil, errors.New("truncated record (key)")
+	}
+
+	if _, err := io.ReadFull(r, size); err != nil {
+		return nil, nil, errors.New("truncated record (value size)")
+	}
+	valueSize := binary.LittleEndian.Uint32(size)
+	if uint64(keySize)+uint64(valueSize) > maxMessageSize {
+		return nil, nil, fmt.Errorf("message too long (%d bytes)", uint64(keySize)+uint64(valueSize))
+	}
+
+	value := make([]byte, valueSize)
+	if _, err := io.ReadFull(r, value); err != nil {
+		return nil, nil, errors.New("truncated record (value)")
+	}
+	return key, value, nil
+}
+
+const maxMessageSize = 1024
+
+func doProduce(serverPath string, args []string) int {
+	if len(args) < 1 || len(args) > 2 || !reg.MatchString(args[0]) || (len(args) == 2 && args[1] != "--raw") {
+		fmt.Fprintln(os.Stderr, "usage: <ipc_identifier> produce <topic_name> [--raw]  (topic_name: ^[a-zA-Z0-9_.-]{1,32}$)")
+		return 1
+	}
+	topic := args[0]
+	raw := len(args) == 2
+
+	serverFile, err := connectServer(serverPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	req := internal.Request{Cmd: internal.CmdProduce, Topic: topic, Reply: replyFifoPath(serverPath)}
+	resp, err := request(serverFile, req)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 3
+	}
+	if !resp.OK {
+		fmt.Fprintln(os.Stderr, "error:", resp.Error)
+		if resp.Code != 0 {
+			return resp.Code
+		}
+		return 3
+	}
+
+	serverFile, err = connectServer(serverPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 3
+	}
+	defer serverFile.Close()
+
+	stdin := bufio.NewReader(os.Stdin)
+	scan := bufio.NewScanner(stdin)
+	for {
+		var key, value []byte
+		if raw {
+			key, value, err = readRawMessage(stdin)
+		} else {
+			key, value, err = readTextMessage(scan)
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		if len(key)+len(value) > maxMessageSize {
+			fmt.Fprintln(os.Stderr, "error: message too long, max", maxMessageSize, "bytes")
+			return 1
+		}
+
+		msg := internal.Request{Cmd: internal.CmdMsg, Topic: topic, Key: key, Value: value}
+		toSend, err := json.Marshal(msg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 1
+		}
+		if _, err := fmt.Fprintf(serverFile, "%s\n", toSend); err != nil {
+			fmt.Fprintln(os.Stderr, "error: server disconnected:", err)
+			return 3
+		}
+	}
+	return 0
+}
+
+func doSubscribe(serverPath string, args []string) int {
+	fmt.Fprintln(os.Stderr, "subscribe: not implemented yet")
+	return 1
+}
+
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "errore: not enough arguments")
+		fmt.Fprintln(os.Stderr, "usage: ./client <ipc> <create|list|produce|subscribe|info> [args...]")
 		os.Exit(1)
 	}
 	serverPath := os.Args[1]
-	info, err := os.Stat(serverPath)
-	if err != nil || info.Mode()&os.ModeNamedPipe == 0 {
-		fmt.Fprintln(os.Stderr, "Not a valid server path:", err)
-		os.Exit(1)
-	}
-	x, err := os.OpenFile(serverPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
-	if errors.Is(err, syscall.ENXIO) {
-		fmt.Fprintln(os.Stderr, "Server is offline:", err)
-		os.Exit(1)
-	}
 	command := os.Args[2]
-	pid := os.Getpid()
-	path := fmt.Sprintf("/tmp/operator.client.%d", pid)
-	err = syscall.Mkfifo(path, 0666)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "errore:", err)
-		os.Exit(1)
-	}
+	args := os.Args[3:]
+
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
 	go func() {
-		s := <-sigs
-		fmt.Fprintln(os.Stderr, "ricevuto", s)
-		os.Remove(path)
+		<-sigs
+		os.Remove(replyFifoPath(serverPath))
 		os.Exit(0)
 	}()
 
 	switch command {
-	case "create":
-		os.Exit(doCreate(serverPath, os.Args[3:]))
 	case "list":
-		os.Exit(doList(serverPath, os.Args[3:]))
-	case "produce":
-		if len(os.Args) < 4 || len(os.Args) > 5 {
-			fmt.Fprintln(os.Stderr, "Wrong produce format\nExpected: <ipc> produce <topic>\nWith optional flag --raw", err)
-			os.Remove(path)
-			os.Exit(1)
-		}
-		if len(os.Args) == 4 {
-			doProduce()
-		} else {
-			if os.Args[4] != "--raw" {
-				fmt.Fprintln(os.Stderr,
-					"Wrong produce format\nExpected: <ipc> produce <topic>\nWith optional flag --raw", err)
-				os.Remove(path)
-				os.Exit(1)
-			}
-			doProduceRaw()
-		}
-	case "subscribe":
-		doSubscribe()
+		os.Exit(doList(serverPath, args))
+	case "create":
+		os.Exit(doCreate(serverPath, args))
 	case "info":
-		os.Exit(doInfo(serverPath, os.Args[3:]))
+		os.Exit(doInfo(serverPath, args))
+	case "produce":
+		os.Exit(doProduce(serverPath, args))
+	case "subscribe":
+		os.Exit(doSubscribe(serverPath, args))
 	default:
-		fmt.Fprintln(os.Stderr, "Unrecognised command")
-		os.Remove(path)
+		fmt.Fprintln(os.Stderr, "unknown command:", command)
 		os.Exit(1)
-	}
-	defer os.Remove(path)
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "errore:", err)
-		os.Exit(1)
-	}
-	scan := bufio.NewScanner(f)
-	for scan.Scan() {
-		line := scan.Text()
-		fmt.Printf("%s\n", line)
 	}
 }

@@ -20,6 +20,7 @@ type Response struct {
 
 
 const (
+	CmdMsg = "msg"
 	CmdList   = "list"
 	CmdCreate = "create"
 	CmdInfo   = "info"
