@@ -26,10 +26,25 @@ func (s *Server) handleRequest(data []byte) {
 		}
 
 	case protocol.ListTopics:
-		// TODO
+		resp = protocol.Ok(s.listTopics())
 
 	case protocol.Produce:
-		// TODO
+		t, ok := s.topics.Get(req.Topic)
+		if !ok {
+			resp = protocol.Failure(2, "topic does not exist")
+			break
+		}
+		if req.Key == nil && req.Value == nil {
+			resp = protocol.Ok("")
+			break
+		}
+		if len(req.Key)+len(req.Value) > 1024 {
+			resp = protocol.Failure(1, "message too large")
+			break
+		}
+		off := t.append(req.Key, req.Value)
+		resp = protocol.Ok("")
+		resp.Offset = off
 
 	case protocol.RegisterClient:
 		// TODO

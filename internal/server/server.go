@@ -13,17 +13,17 @@ import (
 	"treenity/internal/utils"
 )
 
-const isDev = true
-
 const bufferReadSize = 4096
+const isDev = true
 
 var clientNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,32}$`)
 
 type Server struct {
-	path string
-	fifo *os.File
+	devMode bool
+	path    string
+	fifo    *os.File
 
-	topics      map[string]*Topic
+	topics      *utils.HashMap[*Topic]
 	topicsMutex sync.RWMutex
 
 	clients *utils.HashMap[ClientData]
@@ -43,9 +43,10 @@ func New() (*Server, error) {
 	}
 
 	return &Server{
+		devMode: isDev,
 		path:    path,
 		fifo:    fifo,
-		topics:  make(map[string]*Topic),
+		topics:  utils.NewHashMap[*Topic](),
 		clients: utils.NewHashMap[ClientData](),
 	}, nil
 }
