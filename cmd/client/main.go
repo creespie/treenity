@@ -1,32 +1,15 @@
 package main
 
-type Request struct {
-	Reply  string  `json:"reply,omitempty"`  
-	Cmd    string  `json:"cmd"`              
-	Topic  string  `json:"topic,omitempty"`  
-	Name   string  `json:"name,omitempty"`   
-	Key    []byte  `json:"key,omitempty"`    
-	Value  []byte  `json:"value,omitempty"`  
-	Prefix string  `json:"prefix,omitempty"` 
-	Offset *uint32 `json:"offset,omitempty"` 
-}
-
-type Response struct {
-	OK    bool   `json:"ok"`              
-	Code  int    `json:"code,omitempty"`  
-	Data  string `json:"data,omitempty"`  
-	Error string `json:"error,omitempty"` 
-}
-
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/signal"
-	"regexp"
-	"strings"
 	"syscall"
+	"regexp"
+
+	"treenity/internal"
 )
 
 var reg = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,32}$`)
@@ -54,63 +37,64 @@ func connectServer(serverPath string) (*os.File, error) {
 	return server, nil
 }
 
-func request(server *os.File, serverPath string, msg string) (string, error) {
+func request(server *os.File, req internal.Request) (internal.Response, error) {
 	defer server.Close()
 
-	replyPath := replyFifoPath(serverPath)
-	if err := syscall.Mkfifo(replyPath, 0600); err != nil {
-		return "", err
+	if err := syscall.Mkfifo(req.Reply, 0600); err != nil {
+		return internal.Response{}, err
 	}
-	defer os.Remove(replyPath)
+	defer os.Remove(req.Reply)
 
-	if _, err := fmt.Fprintf(server, "%s %s\n", replyPath, msg); err != nil {
-		return "", err
-	}
-
-	reply, err := os.OpenFile(replyPath, os.O_RDONLY, 0)
+	toSend, err := json.Marshal(req)
 	if err != nil {
-		return "", err
+		return internal.Response{}, err
+	}
+	if _, err := fmt.Fprintf(server, "%s\n", toSend); err != nil {
+		return internal.Response{}, err
+	}
+
+	reply, err := os.OpenFile(req.Reply, os.O_RDONLY, 0)
+	if err != nil {
+		return internal.Response{}, err
 	}
 	defer reply.Close()
 
 	scan := bufio.NewScanner(reply)
 	if !scan.Scan() {
 		if err := scan.Err(); err != nil {
-			return "", err
+			return internal.Response{}, err
 		}
-		return "", errors.New("server closed the connection without replying")
+		return internal.Response{}, errors.New("server closed the connection without replying")
 	}
-	return scan.Text(), nil
+	var ans internal.Response
+	if err := json.Unmarshal(scan.Bytes(), &ans); err != nil {
+		return internal.Response{}, err
+	}
+	return ans, nil
 }
-func runRequest(serverPath string, msg string) int {
+
+func runRequest(serverPath string, req internal.Request) int {
 	serverFile, err := connectServer(serverPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-	answer, err := request(serverFile, serverPath, msg)
+	req.Reply =  replyFifoPath(serverPath)
+	answer, err := request(serverFile, req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 3
 	}
 
-	parts := strings.SplitN(answer, " ", 2)
-	data := ""
-	if len(parts) == 2 {
-		data = parts[1]
-	}
-
-	switch parts[0] {
-	case "OK":
-		fmt.Println(data)
+	if answer.OK{
+		fmt.Println(answer.Data)
 		return 0
-	case "ERR":
-		fmt.Fprintln(os.Stderr, "error:", data)
-		return 2
-	default:
-		fmt.Fprintln(os.Stderr, "error: unexpected reply from server:", answer)
-		return 3
 	}
+	fmt.Fprintln(os.Stderr, "error:", answer.Error)
+	if answer.Code != 0{
+		return answer.Code
+	}
+	return 3
 }
 
 func doList(serverPath string, args []string) int {
@@ -118,7 +102,8 @@ func doList(serverPath string, args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: <ipc> list")
 		return 1
 	}
-	return runRequest(serverPath, "list")
+	req := internal.Request{Cmd: internal.CmdList}
+	return runRequest(serverPath, req)
 }
 
 func doCreate(serverPath string, args []string) int {
@@ -126,7 +111,8 @@ func doCreate(serverPath string, args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: <ipc> create <topic>  (topic: ^[a-zA-Z0-9_.-]{1,32}$)")
 		return 1
 	}
-	return runRequest(serverPath, "create "+args[0])
+	req := internal.Request{Cmd: internal.CmdCreate, Topic: args[0]}
+	return runRequest(serverPath, req)
 }
 
 func doInfo(serverPath string, args []string) int {
@@ -134,7 +120,8 @@ func doInfo(serverPath string, args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: <ipc> info <name>  (name: ^[a-zA-Z0-9_.-]{1,32}$)")
 		return 1
 	}
-	return runRequest(serverPath, "info "+args[0])
+	req := internal.Request{Cmd: internal.CmdInfo, Name: args[0]}
+	return runRequest(serverPath, req)
 }
 
 func main() {
