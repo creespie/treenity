@@ -1,9 +1,17 @@
 package server
 
-// modello per le sturtture dati di passaggio
+import (
+	"sync"
+
+	"treenity/internal"
+)
+
 type Topic struct {
-	Name     string
-	Messages []Message
+	mu        sync.RWMutex
+	Messages  []Message
+	consumers *prefixIndex
+
+	incoming chan Message
 }
 
 type ClientData struct {
@@ -19,4 +27,12 @@ type Message struct {
 	Key    []byte
 	Value  []byte
 	Offset uint32
+}
+
+func (m Message) delivery() internal.Delivery {
+	return internal.Delivery{
+		Offset: m.Offset,
+		Key:    m.Key,
+		Value:  m.Value,
+	}
 }

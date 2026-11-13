@@ -1,15 +1,19 @@
 package server
 
-//parte che si occupa diinootlre le risposte al fifo de lciebnts
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"syscall"
+	"time"
 
-	"treenity/internal/shared/protocol"
+	"treenity/internal"
 )
 
-func sendResponse(path string, response protocol.Response) {
+const replyOpenTimeout = 2 * time.Second
+
+func sendResponse(path string, response internal.Response) {
 	if path == "" {
 		return
 	}
@@ -20,7 +24,7 @@ func sendResponse(path string, response protocol.Response) {
 		return
 	}
 
-	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	f, err := openReply(path)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Reply FIFO Error:", err)
 		return
@@ -29,5 +33,21 @@ func sendResponse(path string, response protocol.Response) {
 
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		fmt.Fprintln(os.Stderr, "Reply Error:", err)
+	}
+}
+
+func openReply(path string) (*os.File, error) {
+	deadline := time.Now().Add(replyOpenTimeout)
+
+	for {
+		f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			return f, nil
+		}
+
+		if !errors.Is(err, syscall.ENXIO) || time.Now().After(deadline) {
+			return nil, err
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }

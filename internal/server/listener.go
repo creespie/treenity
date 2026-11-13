@@ -6,8 +6,6 @@ import (
 	"os"
 )
 
-// legge le richieste de fFifo e quando ha una riga di richiesta pronta
-// quidni che ha trovato un /n la manda all'ahanler per gestirla
 func (s *Server) Serve() {
 	buf := make([]byte, bufferReadSize)
 	var pending []byte
@@ -21,8 +19,11 @@ func (s *Server) Serve() {
 			if i < 0 {
 				break
 			}
-			line := pending[:i]
+
+			line := make([]byte, i)
+			copy(line, pending[:i])
 			pending = pending[i+1:]
+
 			s.handleRequest(line)
 		}
 
