@@ -85,7 +85,7 @@ func (s *Server) handleRequest(data []byte) {
 
 		resp = ok(strings.Join(names, ","))
 
-	case internal.CmdProduce:
+	case internal.CmdProduce: //vede se ce un topic
 		if _, found := s.getTopic(req.Topic); !found {
 			resp = fail(2, "topic does not exist")
 			break
@@ -239,6 +239,7 @@ func (s *Server) getTopic(name string) (*Topic, bool) {
 }
 
 func (s *Server) consumerPath(name string) string {
+	//non serve mandarla al client perche esso se la ricrea con lo standard
 	return s.path + "." + name
 }
 

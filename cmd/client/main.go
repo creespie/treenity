@@ -13,10 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
- 
+
 	"treenity/internal"
 )
- 
+
 var reg = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,32}$`)
 
 func replyFifoPath(serverPath string) string {
@@ -358,7 +358,7 @@ func doSubscribe(serverPath string, args []string) int {
 	}
 	defer serverFile.Close()
 
-	// La FIFO del subscriber l'ha creata il server.
+	// La FIFO del subscriber l'ha creata il server. giusto dio can
 	// La apriamo in SOLA LETTURA: così, se il server muore, Scan() riceve EOF.
 	subPath := serverPath + "." + name
 	subFile, err := os.OpenFile(subPath, os.O_RDONLY, 0)

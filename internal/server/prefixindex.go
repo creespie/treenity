@@ -3,9 +3,9 @@ package server
 import "treenity/internal/utils"
 
 type prefixIndex struct {
-	byPrefix *utils.HashMap[[]*consumer]
-	direct   []*consumer
-	all      []*consumer
+	byPrefix *utils.HashMap[[]*consumer] //i consmer per prefix in lista
+	direct   []*consumer                 //i consmer senza prefix che piano tutto
+	all      []*consumer                 //una lista di entrabi i consumer per lo shutdown
 }
 
 func newPrefixIndex() *prefixIndex {
@@ -45,11 +45,14 @@ func (p *prefixIndex) remove(c *consumer) {
 	}
 }
 
+// trova chi matcha quella chiave nei ocnumer, se la chiave é ciao
+// matchiano tutto quelli che hanno come prefix
+// c / ci / cia / ciao
 func (p *prefixIndex) match(key []byte) []*consumer {
-	out := make([]*consumer, 0, len(p.direct)+4)
-	out = append(out, p.direct...)
+	out := append([]*consumer{}, p.direct...)
 
 	for i := 1; i <= len(key); i++ {
+		//tagli la hiave da user , u , us, usr,user per trovre i prfessi
 		if list, ok := p.byPrefix.Get(string(key[:i])); ok {
 			out = append(out, list...)
 		}
@@ -72,6 +75,8 @@ func (p *prefixIndex) find(clientID string) *consumer {
 	return nil
 }
 
+
+//toglie elemento. da qualsiais lista gli si passa
 func removeConsumer(list []*consumer, c *consumer) []*consumer {
 	for i, other := range list {
 		if other == c {
