@@ -26,7 +26,6 @@ type Delivery struct {
 }
 
 const (
-	CmdRequest = "request"
 	CmdMsg = "msg"
 	CmdList   = "list"
 	CmdCreate = "create"
@@ -34,4 +33,5 @@ const (
 	CmdProduce = "produce"
 	CmdSubscribe = "subscribe"
 	CmdCommit = "commit"
+	CmdDisconnect = "disconnect"
 )

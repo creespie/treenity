@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"treenity/internal"
 )
-
-const cmdDisconnect = "disconnect"
 
 type clientInfo struct {
 	Client string `json:"client"`
@@ -69,7 +68,7 @@ func (s *Server) handleRequest(data []byte) {
 				t.mu.Unlock()
 
 				for _, c := range targets {
-					c.send(msg.delivery())
+					c.enqueue(msg.delivery()) // non blocca mai
 				}
 			}
 		}()
@@ -93,13 +92,22 @@ func (s *Server) handleRequest(data []byte) {
 		resp = ok("")
 
 	case internal.CmdMsg:
-		t, found := s.getTopic(req.Topic)
-		if !found {
-			fmt.Fprintln(os.Stderr, "produce on unknown topic:", req.Topic)
+		// Teniamo il lock in lettura mentre inviamo: shutdown() prende il
+		// lock in scrittura prima di chiudere i channel, quindi non può
+		// chiuderli mentre siamo qui (niente "send on closed channel").
+		s.topicsMutex.RLock()
+		if s.closing {
+			s.topicsMutex.RUnlock()
 			return
 		}
-
-		t.incoming <- Message{Key: req.Key, Value: req.Value}
+		t, found := s.topics.Get(req.Topic)
+		if found {
+			t.incoming <- Message{Key: req.Key, Value: req.Value}
+		}
+		s.topicsMutex.RUnlock()
+		if !found {
+			fmt.Fprintln(os.Stderr, "produce on unknown topic:", req.Topic)
+		}
 		return
 
 	case internal.CmdSubscribe:
@@ -118,9 +126,13 @@ func (s *Server) handleRequest(data []byte) {
 		s.clientsMutex.Lock()
 		old, known := s.clients.Get(req.Name)
 		if known && old.Active {
-			s.clientsMutex.Unlock()
-			resp = fail(2, "client already subscribed")
-			break
+			// Attivo secondo noi, ma è ancora vivo? (es. ucciso con kill -9)
+			if readerAlive(old.IPCPath) {
+				s.clientsMutex.Unlock()
+				resp = fail(2, "client already subscribed")
+				break
+			}
+			s.dropConsumer(old.Topic, req.Name) // era morto: liberiamo il nome
 		}
 
 		var start uint32
@@ -132,13 +144,22 @@ func (s *Server) handleRequest(data []byte) {
 		}
 
 		path := s.consumerPath(req.Name)
-		c, err := newConsumer(req.Name, req.Prefix, path)
+
+		// Sotto t.mu: backlog e aggiunta all'indice insieme, così nessun
+		// messaggio va perso o arriva due volte, e il backlog sta in coda
+		// PRIMA di qualsiasi messaggio nuovo (ordine per offset garantito).
+		t.mu.Lock()
+		backlog := t.backlogLocked(start, req.Prefix)
+		c, err := newConsumer(req.Name, req.Topic, req.Prefix, path, start, backlog)
 		if err != nil {
+			t.mu.Unlock()
 			s.clientsMutex.Unlock()
 			fmt.Fprintln(os.Stderr, "consumer fifo:", err)
 			resp = fail(3, "cannot create consumer channel")
 			break
 		}
+		t.consumers.add(c)
+		t.mu.Unlock()
 
 		s.clients.Put(req.Name, ClientData{
 			ClientID: req.Name,
@@ -150,15 +171,10 @@ func (s *Server) handleRequest(data []byte) {
 		})
 		s.clientsMutex.Unlock()
 
-		t.mu.Lock()
-		backlog := t.backlogLocked(start, req.Prefix)
-		t.consumers.add(c)
-		t.mu.Unlock()
-
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			c.sendBacklog(backlog)
+			c.run(s.consumerDead)
 		}()
 
 		resp = ok("subscribed to " + req.Topic)
@@ -197,30 +213,15 @@ func (s *Server) handleRequest(data []byte) {
 		s.clientsMutex.Unlock()
 		return
 
-	case cmdDisconnect:
+	case internal.CmdDisconnect:
 		s.clientsMutex.Lock()
 		cd, found := s.clients.Get(req.Name)
-		if found {
+		if found && cd.Active {
 			cd.Active = false
 			s.clients.Put(req.Name, cd)
+			s.dropConsumer(cd.Topic, req.Name)
 		}
 		s.clientsMutex.Unlock()
-
-		if !found {
-			return
-		}
-		if t, exists := s.getTopic(cd.Topic); exists {
-			t.mu.Lock()
-			c := t.consumers.find(req.Name)
-			if c != nil {
-				t.consumers.remove(c)
-			}
-			t.mu.Unlock()
-
-			if c != nil {
-				c.close()
-			}
-		}
 		return
 
 	default:
@@ -256,4 +257,50 @@ func (t *Topic) backlogLocked(start uint32, prefix string) []internal.Delivery {
 		out = append(out, m.delivery())
 	}
 	return out
+}
+
+// Toglie il consumer dall'indice del topic, lo ferma e aspetta che la
+// sua goroutine abbia finito (e cancellato la sua FIFO).
+func (s *Server) dropConsumer(topic, name string) {
+	t, exists := s.getTopic(topic)
+	if !exists {
+		return
+	}
+	t.mu.Lock()
+	c := t.consumers.find(name)
+	if c != nil {
+		t.consumers.remove(c)
+	}
+	t.mu.Unlock()
+	if c != nil {
+		c.stopAndWait(time.Second)
+	}
+}
+
+// Chiamata dalla goroutine di un consumer quando scopre che il client è
+// morto senza disconnettersi. Lo segna come non attivo, così il nome torna
+// libero e il segnalibro resta salvato.
+func (s *Server) consumerDead(c *consumer) {
+	fmt.Fprintln(os.Stderr, "consumer gone:", c.clientID)
+
+	s.clientsMutex.Lock()
+	defer s.clientsMutex.Unlock()
+
+	t, exists := s.getTopic(c.topic)
+	if !exists {
+		return
+	}
+	t.mu.Lock()
+	current := t.consumers.find(c.clientID) == c // è ancora lui, non uno nuovo con lo stesso nome?
+	if current {
+		t.consumers.remove(c)
+	}
+	t.mu.Unlock()
+
+	if current {
+		if cd, found := s.clients.Get(c.clientID); found {
+			cd.Active = false
+			s.clients.Put(c.clientID, cd)
+		}
+	}
 }

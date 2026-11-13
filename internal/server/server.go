@@ -25,6 +25,7 @@ type Server struct {
 	topics      *utils.HashMap[*Topic]
 	topicOrder  []string
 	topicsMutex sync.RWMutex
+	closing     bool // impostato da shutdown(): niente più messaggi nei topic
 
 	clients      *utils.HashMap[ClientData]
 	clientsMutex sync.RWMutex
@@ -65,52 +66,46 @@ func (s *Server) Close() {
 }
 
 func (s *Server) shutdown() {
-	s.topicsMutex.RLock()
+	// 1. Da qui nessun CmdMsg può più mandare su t.incoming: prendere il
+	//    lock in SCRITTURA aspetta anche che finiscano gli invii in corso.
+	s.topicsMutex.Lock()
+	s.closing = true
 	topics := s.topics.GetValues()
-	s.topicsMutex.RUnlock()
+	s.topicsMutex.Unlock()
 
-	//notifichiamo ogni consumer dei topic
+	// 2. Avvisiamo ogni consumer (in coda, dopo i messaggi già pendenti)
+	//    e chiudiamo i channel dei topic: ora è sicuro.
+	var consumers []*consumer
 	for _, t := range topics {
 		t.mu.RLock()
-		for _, c := range t.consumers.list() {
-			c.send(internal.Delivery{Shutdown: true})
-		}
+		list := t.consumers.list()
 		t.mu.RUnlock()
-		//chiudiamo i chanell di incmoing alle go rouotine
+		for _, c := range list {
+			c.enqueue(internal.Delivery{Shutdown: true})
+		}
+		consumers = append(consumers, list...)
 		close(t.incoming)
 	}
 
+	// 3. Aspettiamo che le goroutine finiscano, al massimo 5 secondi.
+	//    Intanto Serve() continua a ricevere i commit dei client.
 	finished := make(chan struct{})
-	//qui facciamo partire wg wait
-	//si sblocca solo se tutte le goroutine hanno finito
-	//a quel punto fa cloase di finisce che il select sotto capta
 	go func() {
 		s.wg.Wait()
 		close(finished)
 	}()
-
-	//questo é come uno switch ma quantistico
-	//ossia osserva contemporaneamente i casi che sono channels
-	//e il primo che manda un segnale sblocca il case
-	//stato fatto perche per chiudere gracefully il server
-	//il subject voleva che si aspettassero max 5 seoncdi che le goroutine
-	//finissero il loro lavoro, quindi o finisco e il server si spegne
-	//o passano 5 seocndi e si spegno comqunue
-
 	select {
 	case <-finished:
 	case <-time.After(shutdownTimeout):
 		fmt.Fprintln(os.Stderr, "shutdown timeout reached, exiting anyway")
 	}
-	//chiudimao il Fifo di ogni consumer e distruggiamolo pure
-	for _, t := range topics {
-		t.mu.RLock()
-		for _, c := range t.consumers.list() {
-			c.close()
-		}
-		t.mu.RUnlock()
-	}
 
+	// 4. Chi non ha finito (client bloccato) viene fermato: chiudere la
+	//    FIFO sblocca la Write. Poi via tutte le FIFO.
+	for _, c := range consumers {
+		c.stop()
+		os.Remove(c.path)
+	}
 	s.fifo.Close()
 	os.Remove(s.path)
 }
